@@ -1,95 +1,93 @@
-import asyncpg
+import psycopg2
+import psycopg2.extras
 import os
-from datetime import datetime
 
 
 class Database:
     def __init__(self):
-        self.pool = None
+        self.conn = None
 
-    async def connect(self):
-        self.pool = await asyncpg.create_pool(
-            host=os.getenv("DB_HOST", "localhost"),
-            port=int(os.getenv("DB_PORT", 5432)),
-            user=os.getenv("DB_USER", "postgres"),
-            password=os.getenv("DB_PASSWORD", "password"),
-            database=os.getenv("DB_NAME", "mebelbot"),
+    def connect(self):
+        self.conn = psycopg2.connect(
+            host=os.getenv("DB_HOST"),
+            port=os.getenv("DB_PORT", 5432),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            database=os.getenv("DB_NAME"),
         )
-        await self.create_tables()
+        self.conn.autocommit = True
+        self.create_tables()
 
-    async def create_tables(self):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
+    def create_tables(self):
+        with self.conn.cursor() as cur:
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
-                    id         BIGINT PRIMARY KEY,
-                    full_name  TEXT,
-                    username   TEXT,
+                    id BIGINT PRIMARY KEY,
+                    full_name TEXT,
+                    username TEXT,
                     created_at TIMESTAMP DEFAULT NOW()
                 );
             """)
-            await conn.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS orders (
-                    id         SERIAL PRIMARY KEY,
-                    user_id    BIGINT REFERENCES users(id),
-                    product    TEXT NOT NULL,
-                    size       TEXT NOT NULL,
-                    color      TEXT NOT NULL,
-                    material   TEXT NOT NULL,
-                    price      BIGINT NOT NULL,
-                    status     TEXT DEFAULT 'pending',
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    product TEXT,
+                    size TEXT,
+                    color TEXT,
+                    material TEXT,
+                    price BIGINT,
+                    status TEXT DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT NOW()
                 );
             """)
 
-    async def add_user(self, user_id, full_name, username):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
+    def add_user(self, user_id, full_name, username):
+        with self.conn.cursor() as cur:
+            cur.execute("""
                 INSERT INTO users (id, full_name, username)
-                VALUES ($1, $2, $3)
+                VALUES (%s, %s, %s)
                 ON CONFLICT (id) DO UPDATE
-                SET full_name = $2, username = $3;
-            """, user_id, full_name, username)
+                SET full_name = %s, username = %s;
+            """, (user_id, full_name, username, full_name, username))
 
-    async def save_order(self, user_id, product, size, color, material, price):
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("""
+    def save_order(self, user_id, product, size, color, material, price):
+        with self.conn.cursor() as cur:
+            cur.execute("""
                 INSERT INTO orders (user_id, product, size, color, material, price)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id;
-            """, user_id, product, size, color, material, price)
-            return row["id"]
+            """, (user_id, product, size, color, material, price))
+            return cur.fetchone()[0]
 
-    async def get_user_orders(self, user_id):
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("""
+    def get_user_orders(self, user_id):
+        with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
                 SELECT id, product, size, color, material, price, status, created_at
-                FROM orders WHERE user_id = $1
+                FROM orders WHERE user_id = %s
                 ORDER BY created_at DESC LIMIT 10;
-            """, user_id)
-            return [dict(r) for r in rows]
+            """, (user_id,))
+            return cur.fetchall()
 
-    async def update_order_status(self, order_id, status):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE orders SET status = $1 WHERE id = $2;
-            """, status, order_id)
+    def update_order_status(self, order_id, status):
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE orders SET status = %s WHERE id = %s;", (status, order_id))
 
-    async def get_all_orders(self, status=None):
-        async with self.pool.acquire() as conn:
+    def get_all_orders(self, status=None):
+        with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             if status:
-                rows = await conn.fetch("""
+                cur.execute("""
                     SELECT o.*, u.full_name, u.username
                     FROM orders o JOIN users u ON o.user_id = u.id
-                    WHERE o.status = $1
-                    ORDER BY o.created_at DESC;
-                """, status)
+                    WHERE o.status = %s ORDER BY o.created_at DESC;
+                """, (status,))
             else:
-                rows = await conn.fetch("""
+                cur.execute("""
                     SELECT o.*, u.full_name, u.username
                     FROM orders o JOIN users u ON o.user_id = u.id
                     ORDER BY o.created_at DESC LIMIT 50;
                 """)
-            return [dict(r) for r in rows]
+            return cur.fetchall()
 
 
 db = Database()
